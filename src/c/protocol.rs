@@ -1401,23 +1401,38 @@ unsafe fn enet_protocol_handle_incoming_commands<S: Socket>(
     let mut peer: *mut ENetPeer<S>;
     let mut current_data: *mut u8;
     let mut header_size: usize;
+    
+    let header: *mut ENetProtocolHeader = (*host).received_data.cast();
+    let new_header: *mut ENetNewProtocolHeader = (*host).received_data.cast();
+
     let mut peer_id: u16;
+
+
     if (*host).received_data_length < 2_usize {
         return false;
     }
-    let header: *mut ENetProtocolHeader = (*host).received_data.cast();
-    peer_id = u16::from_be((*header).peer_id);
+    peer_id = if (*host).using_new_packet_for_server {
+        u16::from_be((*new_header).peer_id)
+    } else {
+        u16::from_be((*header).peer_id)
+    };
     let session_id = ((peer_id as i32 & ENET_PROTOCOL_HEADER_SESSION_MASK as i32)
         >> ENET_PROTOCOL_HEADER_SESSION_SHIFT as i32) as u8;
     let flags = (peer_id as i32 & ENET_PROTOCOL_HEADER_FLAG_MASK as i32) as u16;
     peer_id = (peer_id as i32
         & !(ENET_PROTOCOL_HEADER_FLAG_MASK as i32 | ENET_PROTOCOL_HEADER_SESSION_MASK as i32))
         as u16;
-    header_size = if flags as i32 & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME as i32 != 0 {
-        ::core::mem::size_of::<ENetProtocolHeader>()
-    } else {
-        2_usize
-    };
+
+        header_size = if flags as i32 & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME as i32 != 0 {
+            if (*host).using_new_packet_for_server {
+                ::core::mem::size_of::<ENetNewProtocolHeader>()
+            } else {
+                ::core::mem::size_of::<ENetProtocolHeader>()
+            }
+        } else {
+            2_usize
+        };
+    
     if ((*host).checksum.assume_init_ref()).is_some() {
         header_size =
             (header_size as u64).wrapping_add(::core::mem::size_of::<u32>() as u64) as usize;
@@ -1468,11 +1483,19 @@ unsafe fn enet_protocol_handle_incoming_commands<S: Socket>(
         {
             return false;
         }
-        copy_nonoverlapping(
-            header as *const u8,
-            ((*host).packet_data[1_i32 as usize]).as_mut_ptr(),
-            header_size,
-        );
+        if (*host).using_new_packet_for_server {
+            copy_nonoverlapping(
+                new_header as *const u8,
+                ((*host).packet_data[1_i32 as usize]).as_mut_ptr(),
+                header_size,
+            );
+        } else {
+            copy_nonoverlapping(
+                header as *const u8,
+                ((*host).packet_data[1_i32 as usize]).as_mut_ptr(),
+                header_size,
+            );
+        }
         (*host).received_data = ((*host).packet_data[1_i32 as usize]).as_mut_ptr();
         (*host).received_data_length = header_size.wrapping_add(original_size);
     }
@@ -1558,7 +1581,15 @@ unsafe fn enet_protocol_handle_incoming_commands<S: Socket>(
                 if !peer.is_null() {
                     break;
                 }
-                peer = enet_protocol_handle_connect(host, header, command);
+                if (*host).using_new_packet_for_server {
+                    peer = enet_protocol_handle_connect(
+                        host,
+                        (*new_header).peer_id as *mut ENetProtocolHeader,
+                        command,
+                    );
+                } else {
+                    peer = enet_protocol_handle_connect(host, header, command);
+                }
                 if peer.is_null() {
                     break;
                 }
@@ -1635,7 +1666,13 @@ unsafe fn enet_protocol_handle_incoming_commands<S: Socket>(
         if flags as i32 & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME as i32 == 0 {
             break;
         }
-        let sent_time = u16::from_be((*header).sent_time);
+        // let sent_time = u16::from_be((*header).sent_time);
+        let sent_time = if (*host).using_new_packet_for_server {
+            u16::from_be((*new_header).peer_id)
+        } else {
+            u16::from_be((*header).peer_id)
+        };
+
         match (*peer).state {
             7 | 2 | 0 | 9 => {}
             8 => {
